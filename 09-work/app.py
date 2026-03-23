@@ -6,36 +6,36 @@ import numpy as np
 # 设置页面配置
 st.set_page_config(page_title="产业数据分析看板", layout="wide")
 
+
 # ==========================================
-# 1. 数据加载与预处理模块
+# 1. 数据加载与预处理模块（已强化数据清洗）
 # ==========================================
 @st.cache_data
 def load_data(filepath):
-    """
-    读取并清洗数据
-    根据描述：第一行(序号), 第二行(名称), 第三行开始是数据, 第一列是日期
-    """
     # 读取原始数据
     raw_df = pd.read_csv(filepath, header=None, low_memory=False)
-    
-    # 提取序列名称（第2行，去除第1列的日期列名）
     series_names = raw_df.iloc[1, 1:].values
-    
-    # 提取核心数据（第3行开始）
     df = raw_df.iloc[2:].copy()
-    
-    # 重命名列：Date + 序列名称
     df.columns = ['Date'] + list(series_names)
     
-    # 转换日期格式，并设为索引
-    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    # 1. 转换日期格式，并使用 .dt.normalize() 剥离时分秒，只保留纯净的年月日
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.normalize()
+    
+    # 2. 剔除那些无法识别日期（NaT）的无效行
+    df = df.dropna(subset=['Date'])
+    
+    # 3. 设置日期为索引
     df.set_index('Date', inplace=True)
     
-    # 将所有数据列转为数值型，无法转换的（如 #N/A, NA）转为 NaN
-    df = df.apply(pd.to_numeric, errors='coerce')
+    # 4. 【关键修复】剔除重复的日期行（同一个日期如果有多行，默认保留最后一行的数据）
+    df = df[~df.index.duplicated(keep='last')]
     
-    # 去除列名为空(NaN)的列
+    # 将数据转为数值型并去除空列
+    df = df.apply(pd.to_numeric, errors='coerce')
     df = df.loc[:, df.columns.notna()]
+    
+    # 5. 【关键修复】按时间顺序把数据老老实实排好，避免时间序列发生错位倒流
+    df = df.sort_index()
     
     return df
 
@@ -58,50 +58,52 @@ def categorize_columns(columns):
             
     # 过滤掉空的分类
     return {k: v for k, v in categories.items() if v}
-
 # ==========================================
-# 3. 季节性画图与相关性分析模块
+# 3. 季节性画图与相关性分析模块（已修复断点逻辑）
 # ==========================================
 class DataAnalyzer:
     @staticmethod
     def plot_seasonality(df, col_name):
-        """绘制季节性图（不同年份对比）"""
         # 提取有效数据
         temp_df = df[[col_name]].dropna().copy()
         if temp_df.empty:
             return None
             
-        # 提取年份和月-日
+        # 提取年份，用于分组画线
         temp_df['Year'] = temp_df.index.year.astype(str)
-        temp_df['Month-Day'] = temp_df.index.strftime('%m-%d')
         
-        # 为了保证X轴时间顺序，先按Month-Day排序
-        temp_df = temp_df.sort_values('Month-Day')
+        # 【关键修复】将所有数据的年份强行映射到一个“闰年（2000年）”
+        # 为什么选2000年？因为它包含02-29，这样能容纳所有闰年数据不出错
+        # 这样 X 轴变成了连续的时间轴，彻底告别字符串导致的离散断点问题
+        temp_df['Plot_Date'] = pd.to_datetime('2000-' + temp_df.index.strftime('%m-%d'))
         
-        # 使用 Plotly Express 画线图
+        # 确保数据按时间先后连线
+        temp_df = temp_df.sort_values('Plot_Date')
+        
         fig = px.line(
             temp_df, 
-            x='Month-Day', 
+            x='Plot_Date', 
             y=col_name, 
             color='Year',
             title=f"<b>{col_name}</b> - 季节性走势图",
             template='plotly_white'
         )
         
-        # 优化X轴显示（避免标签过于密集）
-        fig.update_xaxes(nticks=12, tickangle=45)
+        # 【关键修复】告诉 Plotly：遇到周末/假日的缺失值时，请把两头的数据连起来，不要留空！
+        fig.update_traces(connectgaps=True)
+        
+        # 重新格式化 X 轴的显示，隐藏2000年，只展示 月-日
+        fig.update_xaxes(tickformat="%m-%d", nticks=12)
         fig.update_layout(hovermode="x unified", legend_title_text='年份')
         return fig
 
     @staticmethod
     def plot_rolling_corr(df, col1, col2, window):
-        """绘制两条序列的滚动相关系数图"""
-        # 提取两条序列并前向填充或删除缺失值
+        # （此处保持原样即可...）
         temp_df = df[[col1, col2]].dropna().copy()
         if temp_df.empty or len(temp_df) < window:
             return None
             
-        # 计算滚动相关系数
         corr_series = temp_df[col1].rolling(window=window).corr(temp_df[col2])
         
         fig = px.line(
@@ -111,12 +113,10 @@ class DataAnalyzer:
             labels={'x': '日期', 'y': '相关系数 (Correlation)'},
             template='plotly_white'
         )
-        # 相关系数范围在 -1 到 1 之间
         fig.update_yaxes(range=[-1.1, 1.1])
         fig.add_hline(y=0, line_dash="dash", line_color="gray")
         fig.update_layout(hovermode="x unified")
         return fig
-
 # ==========================================
 # 4. Streamlit 页面布局
 # ==========================================
