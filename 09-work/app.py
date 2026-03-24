@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # 设置页面配置
 st.set_page_config(page_title="产业数据分析看板", layout="wide")
@@ -117,6 +119,37 @@ class DataAnalyzer:
         fig.add_hline(y=0, line_dash="dash", line_color="gray")
         fig.update_layout(hovermode="x unified")
         return fig
+
+    @staticmethod
+    def plot_rolling_quantile(df, col_name, window):
+        temp_df = df[[col_name]].dropna().copy()
+        if temp_df.empty or len(temp_df) < window:
+            return None
+            
+        # 计算滚动分位数 (%)，使用 rolling 和 rank
+        temp_df['Quantile'] = temp_df[col_name].rolling(window=window).rank(pct=True) * 100
+        
+        # 画双Y轴图
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        
+        fig.add_trace(
+            go.Scatter(x=temp_df.index, y=temp_df[col_name], name="原始数值", mode='lines', line=dict(color='#1f77b4')),
+            secondary_y=False,
+        )
+        
+        fig.add_trace(
+            go.Scatter(x=temp_df.index, y=temp_df['Quantile'], name=f"{window}日滚动分位数(%)", mode='lines', line=dict(color='#d62728', dash='dot')),
+            secondary_y=True,
+        )
+        
+        fig.update_layout(
+            title=f"<b>{col_name}</b> 走势及 {window} 日滚动分位数",
+            template='plotly_white',
+            hovermode="x unified"
+        )
+        fig.update_yaxes(title_text="原始数值", secondary_y=False)
+        fig.update_yaxes(title_text="分位数 (%)", range=[-5, 105], secondary_y=True)
+        return fig
 # ==========================================
 # 4. Streamlit 页面布局
 # ==========================================
@@ -124,7 +157,7 @@ def main():
     st.title("📈 产业数据库与量化分析看板")
     
     # 1. 加载数据
-    file_path = "工作簿2.csv"
+    file_path = "画图模板-日报.xlsm"
     try:
         with st.spinner('正在加载数据...'):
             df = load_data(file_path)
@@ -139,6 +172,7 @@ def main():
     
     # 3. 创建Tab页面
     tab1, tab2 = st.tabs(["📊 季节性分析 (Seasonality)", "🔗 滚动相关性分析 (Rolling Correlation)"])
+    tab1, tab2, tab3 = st.tabs(["📊 季节性分析 (Seasonality)", "🔗 滚动相关性分析 (Rolling Correlation)", "📈 滚动分位数 (Rolling Quantile)"])
     
     analyzer = DataAnalyzer()
 
@@ -190,6 +224,35 @@ def main():
                 st.plotly_chart(fig_corr, use_container_width=True)
             else:
                 st.warning("所选序列的重合有效数据过少，无法计算滚动相关性。")
+
+    # --------------- 滚动分位数 Tab ---------------
+    with tab3:
+        st.subheader("指标当前值与滚动分位数 (Rolling Quantile)")
+        
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            q_cat = st.selectbox("选择指标类别：", list(categories.keys()), key='q_cat')
+        with col2:
+            q_col = st.selectbox("选择具体序列：", categories[q_cat], key='q_col')
+        with col3:
+            q_window = st.number_input("计算分位数的滚动窗口（天）：", min_value=10, max_value=1000, value=60, step=10, key='q_window')
+            
+        if q_col:
+            temp_df = df[[q_col]].dropna()
+            if len(temp_df) >= q_window:
+                # 计算最新分位数显示
+                latest_val = temp_df[q_col].iloc[-1]
+                latest_date = temp_df.index[-1].strftime('%Y-%m-%d')
+                rolling_series = temp_df[q_col].iloc[-q_window:]
+                current_quantile = rolling_series.rank(pct=True).iloc[-1] * 100
+                
+                st.metric(label=f"最新值 ({latest_date})", value=f"{latest_val:.4f}", delta=f"当前处于过去 {q_window} 天的 {current_quantile:.1f}% 分位")
+                
+                fig_q = analyzer.plot_rolling_quantile(df, q_col, q_window)
+                if fig_q:
+                    st.plotly_chart(fig_q, use_container_width=True)
+            else:
+                st.warning(f"该序列有效数据不足 {q_window} 个，无法计算。")
 
 if __name__ == "__main__":
     main()
