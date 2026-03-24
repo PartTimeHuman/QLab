@@ -1,195 +1,153 @@
-import streamlit as st
 import pandas as pd
-import plotly.express as px
-import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import math
 
-# 设置页面配置
-st.set_page_config(page_title="产业数据分析看板", layout="wide")
-
-# ==========================================
-# 1. 数据加载与预处理模块
-# ==========================================
-@st.cache_data
-def load_data(filepath):
+def generate_seasonal_charts(df, date_col, value_cols):
     """
-    读取并清洗数据
-    根据描述：第一行(序号), 第二行(名称), 第三行开始是数据, 第一列是日期
+    核心绘图函数：根据给定的DataFrame生成季节性对比图(按年对比)。
     """
-    # 读取原始数据
-    raw_df = pd.read_csv(filepath, header=None, low_memory=False)
+    # 1. 确保日期列是 datetime 格式，并提取年份
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    df['Year'] = df[date_col].dt.year
     
-    # 提取序列名称（第2行，去除第1列的日期列名）
-    series_names = raw_df.iloc[1, 1:].values
+    # 创建一个统一的虚拟年份（使用2024这个闰年，完美兼容2月29日）用于对齐X轴
+    df['Dummy_Date'] = pd.to_datetime('2024-' + df[date_col].dt.strftime('%m-%d'), errors='coerce')
     
-    # 提取核心数据（第3行开始）
-    df = raw_df.iloc[2:].copy()
-    
-    # 重命名列：Date + 序列名称
-    df.columns = ['Date'] + list(series_names)
-    
-    # 转换日期格式，并设为索引
-    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-    df.set_index('Date', inplace=True)
-    
-    # 将所有数据列转为数值型，无法转换的（如 #N/A, NA）转为 NaN
-    df = df.apply(pd.to_numeric, errors='coerce')
-    
-    # 去除列名为空(NaN)的列
-    df = df.loc[:, df.columns.notna()]
-    
-    return df
+    # 2. 定义每一年的颜色和线宽（完全还原你 VBA 中的设定）
+    style_map = {
+        2019: {'color': 'rgb(0, 176, 80)',    'width': 1.75}, # 绿
+        2020: {'color': 'rgb(255, 192, 0)',   'width': 1.75}, # 黄
+        2021: {'color': 'rgb(122, 48, 160)',  'width': 1.75}, # 紫
+        2022: {'color': 'rgb(0, 176, 240)',   'width': 1.75}, # 蓝
+        2023: {'color': 'rgb(255, 0, 0)',     'width': 1.75}, # 红
+        2024: {'color': 'rgb(128, 128, 128)', 'width': 1.75}, # 灰
+        2025: {'color': 'rgb(0, 0, 0)',       'width': 2.6},  # 黑 (加粗)
+        2026: {'color': 'rgb(0, 234, 255)',   'width': 3.0}   # 亮蓝 (最粗)
+    }
 
-# ==========================================
-# 2. 序列分类模块
-# ==========================================
-def categorize_columns(columns):
-    """根据列名中的关键词进行简单分类"""
-    categories = {'估值与利润': [], '供需': [], '库存': [], '价格与其他': []}
-    for col in columns:
-        col_str = str(col)
-        if any(kw in col_str for kw in ['估值', '利润', '基差', '价差', '收益', '成本']):
-            categories['估值与利润'].append(col)
-        elif any(kw in col_str for kw in ['产量', '开工', '需求', '进出口', '消费', '销量']):
-            categories['供需'].append(col)
-        elif any(kw in col_str for kw in ['库存', '仓单']):
-            categories['库存'].append(col)
-        else:
-            categories['价格与其他'].append(col)
+    # 3. 计算子图布局 (按每排3个的网格布局)
+    num_charts = len(value_cols)
+    cols = 3
+    rows = math.ceil(num_charts / cols)
+
+    # 创建子图画布
+    fig = make_subplots(
+        rows=rows, 
+        cols=cols, 
+        subplot_titles=value_cols, 
+        horizontal_spacing=0.05,
+        vertical_spacing=0.1 if rows > 1 else 0.2
+    )
+
+    # 4. 循环遍历每一个需要绘制的指标列
+    for i, col_name in enumerate(value_cols):
+        row = (i // cols) + 1
+        col = (i % cols) + 1
+        
+        # 遍历每一年（2019 - 2026）
+        for year in range(2019, 2027):
+            # 提取当年数据并按时间排序
+            year_data = df[df['Year'] == year].sort_values('Dummy_Date')
             
-    # 过滤掉空的分类
-    return {k: v for k, v in categories.items() if v}
+            if year_data.empty or year_data[col_name].isna().all():
+                continue
 
-# ==========================================
-# 3. 季节性画图与相关性分析模块
-# ==========================================
-class DataAnalyzer:
-    @staticmethod
-    def plot_seasonality(df, col_name):
-        """绘制季节性图（不同年份对比）"""
-        # 提取有效数据
-        temp_df = df[[col_name]].dropna().copy()
-        if temp_df.empty:
-            return None
-            
-        # 提取年份和月-日
-        temp_df['Year'] = temp_df.index.year.astype(str)
-        temp_df['Month-Day'] = temp_df.index.strftime('%m-%d')
-        
-        # 为了保证X轴时间顺序，先按Month-Day排序
-        temp_df = temp_df.sort_values('Month-Day')
-        
-        # 使用 Plotly Express 画线图
-        fig = px.line(
-            temp_df, 
-            x='Month-Day', 
-            y=col_name, 
-            color='Year',
-            title=f"<b>{col_name}</b> - 季节性走势图",
-            template='plotly_white'
-        )
-        
-        # 优化X轴显示（避免标签过于密集）
-        fig.update_xaxes(nticks=12, tickangle=45)
-        fig.update_layout(hovermode="x unified", legend_title_text='年份')
-        return fig
+            # 添加折线
+            fig.add_trace(
+                go.Scatter(
+                    x=year_data['Dummy_Date'],
+                    y=year_data[col_name],
+                    mode='lines',
+                    name=str(year),
+                    line=style_map.get(year, {'color': 'grey', 'width': 1}), 
+                    connectgaps=True, # 空值插值连线
+                    showlegend=True if i == 0 else False # 只在第一个图显示图例
+                ),
+                row=row, col=col
+            )
 
-    @staticmethod
-    def plot_rolling_corr(df, col1, col2, window):
-        """绘制两条序列的滚动相关系数图"""
-        # 提取两条序列并前向填充或删除缺失值
-        temp_df = df[[col1, col2]].dropna().copy()
-        if temp_df.empty or len(temp_df) < window:
-            return None
-            
-        # 计算滚动相关系数
-        corr_series = temp_df[col1].rolling(window=window).corr(temp_df[col2])
-        
-        fig = px.line(
-            x=corr_series.index, 
-            y=corr_series.values,
-            title=f"<b>{col1}</b> 与 <b>{col2}</b> 的 {window}天滚动相关系数",
-            labels={'x': '日期', 'y': '相关系数 (Correlation)'},
-            template='plotly_white'
-        )
-        # 相关系数范围在 -1 到 1 之间
-        fig.update_yaxes(range=[-1.1, 1.1])
-        fig.add_hline(y=0, line_dash="dash", line_color="gray")
-        fig.update_layout(hovermode="x unified")
-        return fig
+    # 5. 全局样式设置
+    fig.update_layout(
+        height=max(400, 350 * rows),  # 根据行数动态调整高度，防止图表被压缩
+        width=1200,         
+        title_text="全部列季节性规律对比图",
+        plot_bgcolor='white',
+        font=dict(family="KaiTi, 楷体", size=16, color="black"),
+        hovermode="x unified" 
+    )
 
-# ==========================================
-# 4. Streamlit 页面布局
-# ==========================================
-def main():
-    st.title("📈 产业数据库与量化分析看板")
+    # 将X轴设置为只显示月份
+    fig.update_xaxes(
+        tickformat="%m月",
+        dtick="M1", 
+        showgrid=True,
+        gridcolor='lightgrey',
+        zeroline=False
+    )
     
-    # 1. 加载数据
-    file_path = "工作簿2.csv"
+    fig.update_yaxes(showgrid=True, gridcolor='lightgrey')
+
+# 6. 渲染显示与保存
+    # 尝试强制调用系统默认浏览器打开
+    import plotly.io as pio
+    pio.renderers.default = "browser"
     try:
-        with st.spinner('正在加载数据...'):
-            df = load_data(file_path)
+        fig.show()
     except Exception as e:
-        st.error(f"数据加载失败，请确保 {file_path} 与该脚本在同一目录下。错误信息：{e}")
-        return
-
-    st.success(f"数据加载成功！共包含 {df.shape[0]} 个交易日，{df.shape[1]} 条数据序列。")
-    
-    # 2. 获取分类
-    categories = categorize_columns(df.columns)
-    
-    # 3. 创建Tab页面
-    tab1, tab2 = st.tabs(["📊 季节性分析 (Seasonality)", "🔗 滚动相关性分析 (Rolling Correlation)"])
-    
-    analyzer = DataAnalyzer()
-
-    # --------------- 季节性分析 Tab ---------------
-    with tab1:
-        st.subheader("序列季节性规律展示")
-        col1, col2 = st.columns([1, 3])
+        print(f"⚠️ 自动弹出浏览器失败: {e}")
         
-        with col1:
-            # 第一级菜单：选择大类
-            selected_cat = st.selectbox("选择指标类别：", list(categories.keys()), key='season_cat')
-            # 第二级菜单：选择具体指标
-            selected_col = st.selectbox("选择具体序列：", categories[selected_cat], key='season_col')
-            
-        with col2:
-            if selected_col:
-                fig_season = analyzer.plot_seasonality(df, selected_col)
-                if fig_season:
-                    st.plotly_chart(fig_season, use_container_width=True)
-                else:
-                    st.warning("该序列有效数据不足，无法绘制季节性图。")
+    # 【最核心的保底方案】：自动在当前文件夹生成一个离线的 HTML 文件
+    output_filename = "季节性图表结果.html"
+    fig.write_html(output_filename)
+    print(f"✅ 搞定！图表已成功保存为：{output_filename}")
+    print(f"👉 请在你的代码文件夹中找到【{output_filename}】文件，双击用浏览器（Chrome/Edge等）打开即可查看！")
 
-    # --------------- 相关性分析 Tab ---------------
-    with tab2:
-        st.subheader("双序列滚动相关系数 (Rolling Correlation)")
-        
-        # 布局：左侧选择控制，右侧展示图表
-        ctrl_col1, ctrl_col2, ctrl_col3 = st.columns(3)
-        
-        with ctrl_col1:
-            st.markdown("#### 选择序列 A")
-            cat_a = st.selectbox("类别 (A)：", list(categories.keys()), key='corr_cat_a')
-            col_a = st.selectbox("序列 (A)：", categories[cat_a], key='corr_col_a')
-            
-        with ctrl_col2:
-            st.markdown("#### 选择序列 B")
-            cat_b = st.selectbox("类别 (B)：", list(categories.keys()), index=min(1, len(categories)-1), key='corr_cat_b')
-            col_b = st.selectbox("序列 (B)：", categories[cat_b], key='corr_col_b')
-            
-        with ctrl_col3:
-            st.markdown("#### 设置滚动窗口")
-            window = st.number_input("滚动窗口天数：", min_value=5, max_value=720, value=60, step=10)
-            st.info(f"当前设置：计算过去 {window} 个数据点的相关性。")
-
-        # 画图
-        if col_a and col_b:
-            fig_corr = analyzer.plot_rolling_corr(df, col_a, col_b, window)
-            if fig_corr:
-                st.plotly_chart(fig_corr, use_container_width=True)
-            else:
-                st.warning("所选序列的重合有效数据过少，无法计算滚动相关性。")
-
+# ==========================================
+# 主程序执行入口
+# ==========================================
 if __name__ == "__main__":
-    main()
+    
+    # 1. 设置相对路径和读取文件
+    file_path = '画图模板-日报.xlsm'  # 确保文件名和后缀对应
+    
+    print(f"正在读取文件: {file_path} ...")
+    try:
+        df = pd.read_excel(file_path, sheet_name='日数据', header=1)
+    except FileNotFoundError:
+        print(f"❌ 找不到文件 '{file_path}'，请确保文件和脚本在同一个文件夹！")
+        exit()
+
+    # 清理列名中的多余空格
+    df.columns = df.columns.str.strip()
+    
+    # 2. 指定日期列名称
+    date_col_name = '日期' # 如果你的Excel里这一列不叫"日期"，请改成实际的名字
+    
+    if date_col_name not in df.columns:
+        print(f"❌ 在数据表中找不到名为 '{date_col_name}' 的列，请检查表头！")
+        exit()
+
+    df[date_col_name] = pd.to_datetime(df[date_col_name], errors='coerce')
+    df = df.dropna(subset=[date_col_name])
+
+    # 3. 自动获取所有需要画图的列（排除日期列）
+    all_columns = [col for col in df.columns if col != date_col_name]
+    
+    columns_to_plot = []
+    
+    # 遍历所有列，强制转换为数字类型
+    for col in all_columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+        # 如果转换后，这一列不全是空值（意味着有有效数据），就加入画图列表
+        if not df[col].isna().all():
+            columns_to_plot.append(col)
+
+    print(f"自动识别到 {len(columns_to_plot)} 个数据列，正在生成图表...")
+    
+    # 4. 调用函数生成图表
+    if columns_to_plot:
+        generate_seasonal_charts(df, date_col=date_col_name, value_cols=columns_to_plot)
+        print("✅ 图表生成完毕！")
+    else:
+        print("❌ 没有找到可以绘制的数字数据列。")
